@@ -1,0 +1,1 @@
+# sql-hash-delta-comparer
