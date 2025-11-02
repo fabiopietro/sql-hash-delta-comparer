@@ -84,4 +84,5 @@ It’s the same principle used in warehouse reconciliation engines.
 ---
 
 ## 📊 Visual Model
+<img width="1024" height="1024" alt="image" src="https://github.com/user-attachments/assets/739bb238-ebe2-4860-aa29-2094b444f121" />
 
