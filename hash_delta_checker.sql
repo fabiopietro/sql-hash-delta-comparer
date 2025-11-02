@@ -1,251 +1,250 @@
 SET NOCOUNT ON; 
 
--- Variaveis para parametrizacao do processo 
-DECLARE @TabelaProducao             SYSNAME         = N'tbProducao'; 
-DECLARE @TabelaHomologacao          SYSNAME         = N'tbHomologacao'; 
-DECLARE @ColunasChave               NVARCHAR(MAX)   = N'cod_simulacao,modelo'; 
-DECLARE @ColunasExcecao             NVARCHAR(MAX)   = N'desconto, data_parametro'; -- Diferença prevista devido a ajuste de regra 
+-- Variables for process parameterization 
+DECLARE @ProductionTable         SYSNAME        = N'tbProducao'; 
+DECLARE @StagingTable            SYSNAME        = N'tbHomologacao'; 
+DECLARE @KeyColumns              NVARCHAR(MAX)  = N'cod_simulacao,modelo'; 
+DECLARE @ExceptionColumns        NVARCHAR(MAX)  = N'desconto, data_parametro'; -- Expected difference due to rule adjustment 
 
-DECLARE @Limitador                  NVARCHAR(MAX)   = N'data_parametro'; 
-DECLARE @VerificaCase               BIT = 1                 -- Verificacao de maiuscula/minuscula 
-DECLARE @Separador                  CHAR(1) = CHAR(30);     -- Caracter Invisivel (Unicode para separador de registros) 
+DECLARE @LimitColumn             NVARCHAR(MAX)  = N'data_parametro'; 
+DECLARE @CheckCaseSensitivity    BIT = 1;                              -- Case sensitivity check 
+DECLARE @Separator               CHAR(1) = CHAR(30);                   -- Invisible Character (Unicode record separator) 
 
--- Variaveis de trabalho 
-DECLARE @NomeDaColuna               SYSNAME; 
-DECLARE @DataType                   SYSNAME; 
-DECLARE @Colunas                    NVARCHAR(MAX)   = N''; 
-DECLARE @SQL                        NVARCHAR(MAX); 
-DECLARE @Debug                      BIT = 0                -- Se Ativo serão exibidos as queries dinamicas
-
-
--- Variaveis para testes de quantidades/delta 
-DECLARE @qtdProducao                BIGINT 
-DECLARE @qtdHomolog                 BIGINT 
-DECLARE @qtdDeltaIncluidos          BIGINT 
-DECLARE @qtdDeltaExcluidos          BIGINT 
-DECLARE @qtdDeltaHash               BIGINT 
-
--- Limpa execução anterior 
-DROP TABLE IF EXISTS #HashProducao 
-DROP TABLE IF EXISTS #HashHomolog 
-DROP TABLE IF EXISTS #Auditoria 
+-- Working Variables 
+DECLARE @ColumnName              SYSNAME; 
+DECLARE @DataType                SYSNAME; 
+DECLARE @Columns                 NVARCHAR(MAX)  = N''; 
+DECLARE @SQL                     NVARCHAR(MAX); 
+DECLARE @DebugMode               BIT = 0;                              -- If Active, dynamic queries will be displayed
 
 
--- Cria tabela de Hash da produção 
-CREATE TABLE #HashProducao ( 
-                              Chave VARCHAR(200)
-                            , Hash VARCHAR(200) 
-                            ); 
+-- Variables for quantity/delta tests 
+DECLARE @ProdCount               BIGINT; 
+DECLARE @StagingCount            BIGINT; 
+DECLARE @DeltaIncludedCount      BIGINT; 
+DECLARE @DeltaExcludedCount      BIGINT; 
+DECLARE @DeltaHashCount          BIGINT; 
 
--- Cria tabela de Hash de homologacao 
-CREATE TABLE #HashHomolog    ( 
-                              Chave VARCHAR(200)
-                            , Hash VARCHAR(200) 
-                            ); 
+-- Clear previous execution 
+DROP TABLE IF EXISTS #ProdHash 
+DROP TABLE IF EXISTS #StagingHash 
+DROP TABLE IF EXISTS #Audit 
 
--- Cria tabela de Hash de homologacao 
-CREATE TABLE #Auditoria    ( 
-                              Chave        VARCHAR(200)
-                            , Mensagem  VARCHAR(300) 
-                            ); 
 
--- Como as colunas são informadas manualmente pode haver espaco extra
-SET @ColunasChave   = REPLACE(@ColunasChave, ' ', ''); 
-SET @ColunasChave   = REPLACE(@ColunasChave, ',', ',''' + @Separador + ''','); 
-SET @ColunasExcecao = REPLACE(@ColunasExcecao, ' ', '')
+-- Create Hash table for production 
+CREATE TABLE #ProdHash ( 
+                             KeyColumn VARCHAR(200) 
+                           , Hash VARCHAR(200) 
+                           ); 
 
--- Previne espaco no nome da coluna delimitador S
-SET @Limitador      = QUOTENAME(@Limitador) 
+-- Create Hash table for staging 
+CREATE TABLE #StagingHash    ( 
+                             KeyColumn VARCHAR(200) 
+                           , Hash VARCHAR(200) 
+                           ); 
 
---Cria cursor para ler o nome de todas as colunas da tabela no ambiente de producao D
-DECLARE cursor1 CURSOR FOR  SELECT c.name ,t.name AS typ 
-                            FROM sys.columns    c 
-                            JOIN sys.types      t ON t.user_type_id = c.user_type_id 
-                            JOIN sys.objects    o ON o.object_id = c.object_id 
-                            WHERE o.name = @TabelaProducao 
-                              AND o.type = 'U' 
-                              AND ( 
-                                     -- Nao teve coluna excecao
-                                    LEN(@ColunasExcecao) = 0 OR             
-                                    --Previne excluir coluna por parte do nome
-                                    CHARINDEX(',' + c.name + ',', ',' +@ColunasExcecao + ',')= 0 
-                                  ) 
+-- Create Audit table 
+CREATE TABLE #Audit    ( 
+                             KeyColumn     VARCHAR(200) 
+                           , Message      VARCHAR(300) 
+                           ); 
+
+-- Since columns are manually entered, there might be extra spaces
+SET @KeyColumns       = REPLACE(@KeyColumns, ' ', ''); 
+SET @KeyColumns       = REPLACE(@KeyColumns, ',', ',''' + @Separator + ''','); 
+SET @ExceptionColumns = REPLACE(@ExceptionColumns, ' ', '')
+
+-- Prevent space in the delimiter column name
+SET @LimitColumn      = QUOTENAME(@LimitColumn) 
+
+-- Create cursor to read all column names from the production environment table
+DECLARE cursor1 CURSOR FOR 
+    SELECT c.name ,t.name AS typ 
+    FROM sys.columns     c 
+    JOIN sys.types       t ON t.user_type_id = c.user_type_id 
+    JOIN sys.objects     o ON o.object_id = c.object_id 
+    WHERE o.name = @ProductionTable 
+      AND o.type = 'U' 
+      AND ( 
+               -- No exception column provided
+               LEN(@ExceptionColumns) = 0 OR              
+               -- Prevent excluding a column by partial name matching
+               CHARINDEX(',' + c.name + ',', ',' +@ExceptionColumns + ',')= 0 
+          ) 
 
 OPEN cursor1; 
 
 
-FETCH NEXT FROM cursor1 INTO @NomeDaColuna ,@DataType;
+FETCH NEXT FROM cursor1 INTO @ColumnName ,@DataType;
 
 WHILE @@FETCH_STATUS = 0 
 BEGIN 
 
 DECLARE @expr NVARCHAR(MAX); 
--- Preve que exista espaco dentro do nome da coluna 
+-- Handle column names that might contain spaces 
 
-SET @NomeDaColuna = QUOTENAME(@NomeDaColuna) 
+SET @ColumnName = QUOTENAME(@ColumnName) 
 
-    -- expressão padronizada por tipo para HASH/DETAIL 
+    -- Standardized expression by type for HASH/DETAIL 
     IF @DataType IN ('date','datetime','smalldatetime','datetime2','datetimeoffset','time') 
-        SET @expr = N'ISNULL(CONVERT(CHAR(33), ' + @NomeDaColuna + ', 126), '''')'; 
+        SET @expr = N'ISNULL(CONVERT(CHAR(33), ' + @ColumnName + ', 126), '''')'; 
     ELSE IF @DataType IN ('uniqueidentifier') 
-        SET @expr = N'ISNULL(CONVERT(CHAR(36), ' + @NomeDaColuna +'), '''')'; 
+        SET @expr = N'ISNULL(CONVERT(CHAR(36), ' + @ColumnName +'), '''')'; 
     ELSE IF @DataType IN ('int','bigint','smallint','tinyint','bit','decimal','numeric','money','smallmoney','float','real')
-        SET @expr = N'ISNULL(CONVERT(VARCHAR(100), '+ @NomeDaColuna +'), '''')'; 
+        SET @expr = N'ISNULL(CONVERT(VARCHAR(100), '+ @ColumnName +'), '''')'; 
     ELSE 
-        SET @expr = N'ISNULL(CAST('+ @NomeDaColuna +' AS NVARCHAR(MAX)), '''')'; 
+        SET @expr = N'ISNULL(CAST('+ @ColumnName +' AS NVARCHAR(MAX)), '''')'; 
 
 
-    IF @VerificaCase = 0 
-        SET @Colunas += REPLICATE(' ', 57) + @expr + ',' + CHAR(13);
+    IF @CheckCaseSensitivity = 0 
+        SET @Columns += REPLICATE(' ', 57) + @expr + ',' + CHAR(13);
     ELSE 
-        SET @Colunas += REPLICATE(' ', 57) + N'UPPER(' + @expr + '),'  + CHAR(13);
+        SET @Columns += REPLICATE(' ', 57) + N'UPPER(' + @expr + '),'  + CHAR(13);
 
-    -- Carrega proxima linha do cursor 
-    FETCH NEXT FROM cursor1 INTO @NomeDaColuna ,@DataType; 
+    -- Load next cursor line 
+    FETCH NEXT FROM cursor1 INTO @ColumnName ,@DataType; 
 END 
 
--- Fecha e limpa o cursor 
+-- Close and clean up cursor 
 CLOSE cursor1; 
 DEALLOCATE cursor1; 
 
--- Retira ultima virgula 
-SET @Colunas            = LEFT(@Colunas, LEN(@Colunas) - 2) 
-
+-- Remove last comma 
+SET @Columns             = LEFT(@Columns, LEN(@Columns) - 2) 
 
 
 ------------------------------------------------------------
--- Cria tabelas Hash
+-- Create Hash Tables
 ------------------------------------------------------------
--- Previne espaco no nome das tabelas 
-SET @TabelaProducao        = QUOTENAME(@TabelaProducao) 
-SET @TabelaHomologacao    = QUOTENAME(@TabelaHomologacao) 
+-- Prevent space in table names 
+SET @ProductionTable      = QUOTENAME(@ProductionTable) 
+SET @StagingTable         = QUOTENAME(@StagingTable) 
 
--- Build da SQL da tabelade producao 
+-- Build SQL for production table 
 SET @SQL = N'
-INSERT INTO #HashProducao 
-SELECT CONCAT(' + @ColunasChave + N') AS CHAVE, 
-CONVERT(VARCHAR(64), HASHBYTES(''SHA2_256'', CONCAT(' + CHAR(13) + @Colunas + N')),2) AS Hash 
-FROM ' + @TabelaProducao + N';'; 
+INSERT INTO #ProdHash 
+SELECT CONCAT(' + @KeyColumns + N') AS KeyColumn, 
+CONVERT(VARCHAR(64), HASHBYTES(''SHA2_256'', CONCAT(' + CHAR(13) + @Columns + N')),2) AS Hash 
+FROM ' + @ProductionTable + N';'; 
 
 
--- Se o limitador foi informado refaz o SQL pra considerar isso (Inclui WHERE Coluna...) 
-IF LEN(@Limitador) > 0 
+-- If the limit column was provided, update the SQL to consider it (Include WHERE Column...) 
+IF LEN(@LimitColumn) > 0 
 BEGIN 
     SET @SQL = LEFT(@SQL, LEN(@SQL) - 1); 
-    SET @SQL += N' WHERE ' + @Limitador + N' = (SELECT MAX(' + @Limitador + N') FROM ' + @TabelaProducao + N');'; 
+    SET @SQL += N' WHERE ' + @LimitColumn + N' = (SELECT MAX(' + @LimitColumn + N') FROM ' + @ProductionTable + N');'; 
 END 
 
 
-IF @Debug = 1 
+IF @DebugMode = 1 
 BEGIN 
     PRINT '------------------------------------------------------------------------------'
-    PRINT 'Query da tabela de produção'
+    PRINT 'Production Table Query'
     PRINT '------------------------------------------------------------------------------'
     PRINT CHAR(13) + @SQL + CHAR(13)
 END
 
--- Carrega a tabela Hash de homologacao
-EXEC (@SQL)  
+-- Load production Hash table
+EXEC (@SQL) 
 
 
--- Build da SQL da tabela de homologação 
-SET @SQL = N'INSERT INTO #HashHomolog 
-SELECT CONCAT(' + @ColunasChave + N') AS CHAVE, 
-CONVERT(VARCHAR(64), HASHBYTES(''SHA2_256'', CONCAT(' + CHAR(13) + @Colunas + N')),2) AS Hash 
-FROM ' + @TabelaHomologacao + ';'; 
+-- Build SQL for staging table 
+SET @SQL = N'INSERT INTO #StagingHash 
+SELECT CONCAT(' + @KeyColumns + N') AS KeyColumn, 
+CONVERT(VARCHAR(64), HASHBYTES(''SHA2_256'', CONCAT(' + CHAR(13) + @Columns + N')),2) AS Hash 
+FROM ' + @StagingTable + ';'; 
 
 
-IF @Debug = 1 
+IF @DebugMode = 1 
 BEGIN 
     PRINT '------------------------------------------------------------------------------'
-    PRINT 'Query da tabela de homologacao'
+    PRINT 'Staging Table Query'
     PRINT '------------------------------------------------------------------------------'
     PRINT CHAR(13) + @SQL + CHAR(13)
 
 END
 
--- Carrega a tabela Hash de homologacao
+-- Load staging Hash table
 EXEC (@SQL) 
 
 ------------------------------------------------------------
--- Calcula Deltas
+-- Calculate Deltas
 ------------------------------------------------------------
 
 PRINT '------------------------------------------------------------------------------'
-PRINT 'Apuração dos Delta'
+PRINT 'Delta Calculation'
 PRINT '------------------------------------------------------------------------------'
 
 
-SELECT @qtdProducao = COUNT_BIG(*)  FROM #HashProducao 
-SELECT @qtdHomolog  = COUNT_BIG(*)  FROM #HashHomolog 
+SELECT @ProdCount = COUNT_BIG(*)  FROM #ProdHash 
+SELECT @StagingCount  = COUNT_BIG(*)  FROM #StagingHash 
 
 
--- Carrega na tabela de auditoria os registros que foram excluidos
-INSERT INTO #Auditoria
-SELECT Chave , 'Registro excluido'
+-- Load into the audit table records that were excluded (exist in Prod, not in Staging)
+INSERT INTO #Audit
+SELECT KeyColumn , 'Record excluded'
 FROM (
-    SELECT Chave 
-    FROM #HashProducao 
+    SELECT KeyColumn 
+    FROM #ProdHash 
     EXCEPT 
-    SELECT Chave 
-    FROM #HashHomolog 
+    SELECT KeyColumn 
+    FROM #StagingHash 
  ) AS Delta;
  
 
--- Carrega na tabela de auditoria os registros que foram excluidos
-INSERT INTO #Auditoria
-SELECT Chave, 'Registro novo'
+-- Load into the audit table records that are new (exist in Staging, not in Prod)
+INSERT INTO #Audit
+SELECT KeyColumn, 'New record'
 FROM (
-    SELECT Chave 
-    FROM #HashHomolog
+    SELECT KeyColumn 
+    FROM #StagingHash
     EXCEPT 
-    SELECT Chave 
-    FROM #HashProducao 
+    SELECT KeyColumn 
+    FROM #ProdHash 
 ) AS Delta;
 
--- Carrega na tabela de auditoria os registros que foram excluidos    
-INSERT INTO #Auditoria
-SELECT  A.Chave
-      ,'Chave identica, mas com diferença imprevista'
-FROM #HashProducao A 
-INNER JOIN #HashHomolog B    ON B.Chave = A.Chave 
-                            AND B.Hash <> A.Hash; 
+-- Load into the audit table records that have an identical key but an unexpected difference 
+INSERT INTO #Audit
+SELECT  A.KeyColumn
+      ,'Identical key, but with unexpected difference'
+FROM #ProdHash A 
+INNER JOIN #StagingHash B     ON B.KeyColumn = A.KeyColumn 
+                              AND B.Hash <> A.Hash; 
 
 
 ------------------------------------------------------------
--- Calcula Deltas
+-- Final Delta Calculations
 ------------------------------------------------------------
--- Delta Excluidos(quantidade pode estar igual, mas ter registro ausente compensado por uma inclusao) 
-SELECT @qtdDeltaExcluidos   = COUNT_BIG(*)  FROM  #Auditoria WHERE Mensagem = 'Registro excluido'
+-- Excluded Delta (quantity might be equal, but record is absent compensated by an inclusion) 
+SELECT @DeltaExcludedCount    = COUNT_BIG(*)  FROM  #Audit WHERE Message = 'Record excluded'
 
--- Delta Novos(quantidade pode estar igual, mas ter registro novo devido compensado por uma exclusão) 
-SELECT @qtdDeltaIncluidos   = COUNT_BIG(*)  FROM  #Auditoria WHERE Mensagem = 'Registro novo'
+-- Included Delta (quantity might be equal, but record is new compensated by an exclusion) 
+SELECT @DeltaIncludedCount    = COUNT_BIG(*)  FROM  #Audit WHERE Message = 'New record'
 
--- Calcula quantidade de registros com chave identica, mas Hash diferente (Imprevisto) 
-SELECT @qtdDeltaHash        = COUNT_BIG(*)  FROM  #Auditoria WHERE Mensagem = 'Chave identica, mas com diferença imprevista'
+-- Calculate count of records with identical key, but different Hash (Unexpected) 
+SELECT @DeltaHashCount          = COUNT_BIG(*)  FROM  #Audit WHERE Message = 'Identical key, but with unexpected difference'
 
 
---Verifica se quantidades bateu 
-IF @qtdProducao <> @qtdHomolog 
-    PRINT 'Divergencia na quantidade: Producao com ' + FORMAT(@qtdProducao, 'N0', 'pt-BR') + ' registros ' + CHAR(13) + 
-          '                           Homolog com ' + FORMAT(@qtdHomolog, 'N0', 'pt-BR') + ' registros ' 
+-- Check if quantities match 
+IF @ProdCount <> @StagingCount 
+    PRINT 'Quantity Divergence: Production with ' + FORMAT(@ProdCount, 'N0', 'pt-BR') + ' records ' + CHAR(13) + 
+          '                     Staging with ' + FORMAT(@StagingCount, 'N0', 'pt-BR') + ' records ' 
 ELSE 
-    PRINT 'Quantidade de registros identica em ambas as tabelas: ' + FORMAT(@qtdProducao, 'N0', 'pt-BR') + ' registros ' 
+    PRINT 'Identical record count in both tables: ' + FORMAT(@ProdCount, 'N0', 'pt-BR') + ' records ' 
     
 
---Imprime a quantidade de cada Delta 
-IF @qtdDeltaExcluidos > 0     
-    PRINT 'Foram excluidos '   + FORMAT(@qtdDeltaExcluidos, 'N0', 'pt-BR') + ' registros' 
+-- Print the quantity of each Delta 
+IF @DeltaExcludedCount > 0      
+    PRINT 'Were excluded '    + FORMAT(@DeltaExcludedCount, 'N0', 'pt-BR') + ' records' 
 
-IF @qtdDeltaIncluidos > 0     
-    PRINT 'Foram incluidos '   + FORMAT(@qtdDeltaIncluidos, 'N0', 'pt-BR') + ' novos registros' 
-                         
-IF @qtdDeltaHash > 0 
-    PRINT 'Foram encontrados ' + FORMAT(@qtdDeltaHash, 'N0', 'pt-BR') + ' registros com chave identica, mas com diferença imprevista' 
-
+IF @DeltaIncludedCount > 0      
+    PRINT 'Were included '    + FORMAT(@DeltaIncludedCount, 'N0', 'pt-BR') + ' new records' 
+                            
+IF @DeltaHashCount > 0 
+    PRINT 'Were found ' + FORMAT(@DeltaHashCount, 'N0', 'pt-BR') + ' records with identical key, but with unexpected difference' 
 
 
 PRINT '------------------------------------------------------------------------------'
 
 
-SELECT * FROM #Auditoria
+SELECT * FROM #Audit
